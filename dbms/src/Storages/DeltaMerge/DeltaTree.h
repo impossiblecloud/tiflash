@@ -33,6 +33,7 @@ extern const char delta_tree_create_node_fail[];
 namespace DB::ErrorCodes
 {
 extern const int FAIL_POINT_ERROR;
+extern const int DT_DELTA_INDEX_ERROR;
 };
 
 namespace DB::DM
@@ -1097,7 +1098,7 @@ DT_CLASS::DeltaTree(const DT_CLASS::Self & o)
         {
             auto intern = as(Intern, node);
             if (unlikely(!intern->count))
-                throw Exception("Unexpected internal node which count = 0");
+                throw Exception("Unexpected internal node which count = 0", ErrorCodes::DT_DELTA_INDEX_ERROR);
             if (isLeaf(intern->children[0]))
             {
                 for (size_t i = 0; i < intern->count; ++i)

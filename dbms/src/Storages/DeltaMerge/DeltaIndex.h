@@ -86,7 +86,7 @@ private:
 
     DeltaIndexPtr tryCloneInner(size_t rows_limit, size_t placed_deletes_limit, const Updates * updates = nullptr)
     {
-        DeltaTreePtr delta_tree_copy;
+        DeltaTreePtr new_delta_tree;
         size_t placed_rows_copy = 0;
         size_t placed_deletes_copy = 0;
         {
@@ -96,15 +96,18 @@ private:
             // - Second, make sure the snapshot includes all duplicated tuples in the delta index.
             if (placed_deletes <= placed_deletes_limit && delta_tree->maxDupTupleID() < static_cast<Int64>(rows_limit))
             {
-                delta_tree_copy = delta_tree;
+                // Deep-copy the tree while holding the mutex. Releasing the lock before the BFS
+                // traversal allows concurrent addInsert/addDelete to trigger root collapse
+                // (count 1->0) on the same tree object, which the copy constructor would observe
+                // as an invalid node and throw DT_DELTA_INDEX_ERROR.
+                new_delta_tree = std::make_shared<DefaultDeltaTree>(*delta_tree);
                 placed_rows_copy = placed_rows;
                 placed_deletes_copy = placed_deletes;
             }
         }
 
-        if (delta_tree_copy)
+        if (new_delta_tree)
         {
-            auto new_delta_tree = std::make_shared<DefaultDeltaTree>(*delta_tree_copy);
             auto new_index
                 = std::make_shared<DeltaIndex>(new_delta_tree, placed_rows_copy, placed_deletes_copy, rn_cache_key);
             // try to do some updates before return it if need

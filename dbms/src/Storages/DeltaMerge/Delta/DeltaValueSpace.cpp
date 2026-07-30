@@ -28,6 +28,11 @@
 
 #include <ext/scope_guard.h>
 
+namespace DB::ErrorCodes
+{
+extern const int DT_DELTA_INDEX_ERROR;
+}
+
 namespace DB::DM
 {
 
@@ -392,8 +397,26 @@ bool DeltaValueSpace::flush(DMContext & context)
     if (!delta_index_updates.empty())
     {
         LOG_DEBUG(log, "Update index start, delta={}", simpleInfo());
-        new_delta_index = cur_delta_index->cloneWithUpdates(delta_index_updates);
-        LOG_DEBUG(log, "Update index done, delta={}", simpleInfo());
+        try
+        {
+            new_delta_index = cur_delta_index->cloneWithUpdates(delta_index_updates);
+            LOG_DEBUG(log, "Update index done, delta={}", simpleInfo());
+        }
+        catch (const Exception & e)
+        {
+            if (e.code() != ErrorCodes::DT_DELTA_INDEX_ERROR)
+                throw;
+            // The delta index is unusable (see DeltaTree's copy constructor). Leaving
+            // `new_delta_index` null skips the index update below, which is the same
+            // path taken when there is nothing to update: the flush still commits and
+            // the index is rebuilt on the next read. Without this the exception escapes
+            // to the proxy FFI boundary, whose catch-all calls exit(-1).
+            LOG_ERROR(
+                log,
+                "Update index failed, skipping index update, delta={} message={}",
+                simpleInfo(),
+                e.message());
+        }
     }
     GET_METRIC(tiflash_storage_subtask_throughput_bytes, type_delta_flush).Increment(flush_task->getFlushBytes());
     GET_METRIC(tiflash_storage_subtask_throughput_rows, type_delta_flush).Increment(flush_task->getFlushRows());

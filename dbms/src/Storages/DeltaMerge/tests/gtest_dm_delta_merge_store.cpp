@@ -3943,7 +3943,9 @@ void DeltaMergeStoreRWTest::dupHandleVersionAndDeltaIndexAdvancedThanSnapshot()
               auto [placed_rows, placed_deletes] = delta_index->getPlacedStatus();
               ASSERT_EQ(placed_rows, expect_rows);
               ASSERT_EQ(placed_deletes, expect_deletes);
-              ASSERT_EQ(delta_index->getDeltaTree()->maxDupTupleID(), expect_max_dup_tuple_id);
+              auto delta_tree = delta_index->getDeltaTree();
+              auto tree_lock = delta_tree->lockForRead();
+              ASSERT_EQ(delta_tree->maxDupTupleID(tree_lock), expect_max_dup_tuple_id);
           };
 
     auto ensure_place = [&](SegmentReadTaskPtr seg_read_task) {

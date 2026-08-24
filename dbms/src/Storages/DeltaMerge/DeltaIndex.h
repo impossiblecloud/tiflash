@@ -62,6 +62,11 @@ public:
 private:
     void applyUpdates(const Updates & updates)
     {
+        // `removeInsertsStartFrom` / `updateTupleId` mutate the tree; see
+        // DeltaTree::tree_mutex. Uncontended in practice (the tree belongs to a
+        // DeltaIndex not yet published), but the invariant is that no structural
+        // change happens outside this lock.
+        auto write_lock = delta_tree->lockForWrite();
         for (const auto & update : updates)
         {
             if (placed_rows <= update.rows_offset)
@@ -91,16 +96,18 @@ private:
         size_t placed_deletes_copy = 0;
         {
             std::scoped_lock lock(mutex);
+            // One lock across guard and copy: checking `max_dup_tuple_id` outside
+            // it validates a value that can move before the copy starts.
+            auto tree_lock = delta_tree->lockForRead();
             // Make sure the MVCC view will not be broken by the mismatch of delta index and snapshot:
             // - First, make sure the delta index do not place more deletes than `placed_deletes_limit`.
             // - Second, make sure the snapshot includes all duplicated tuples in the delta index.
-            if (placed_deletes <= placed_deletes_limit && delta_tree->maxDupTupleID() < static_cast<Int64>(rows_limit))
+            if (placed_deletes <= placed_deletes_limit
+                && delta_tree->maxDupTupleID(tree_lock) < static_cast<Int64>(rows_limit))
             {
-                // Deep-copy the tree while holding the mutex. Releasing the lock before the BFS
-                // traversal allows concurrent addInsert/addDelete to trigger root collapse
-                // (count 1->0) on the same tree object, which the copy constructor would observe
-                // as an invalid node and throw DT_DELTA_INDEX_ERROR.
-                new_delta_tree = std::make_shared<DefaultDeltaTree>(*delta_tree);
+                // See `DeltaTree::tree_mutex` for what a concurrent structural
+                // change does to a copy taken without the lock.
+                new_delta_tree = delta_tree->cloneLocked(tree_lock);
                 placed_rows_copy = placed_rows;
                 placed_deletes_copy = placed_deletes;
             }

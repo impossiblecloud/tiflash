@@ -252,6 +252,9 @@ bool placeInsert(
     for (size_t i = 0; i < limit; ++i)
         rids[i] = rid_gen.nextForUpsert();
 
+    // Taken once for the whole batch, never per row: a concurrent DeltaTree
+    // copy must not observe a half-applied structural change.
+    auto write_lock = delta_tree.lockForWrite();
     for (size_t i = 0; i < limit; ++i)
     {
         auto [rid, dup] = rids[i];
@@ -302,6 +305,9 @@ bool placeDelete(
     Rids rids(limit);
     for (size_t i = 0; i < limit; ++i)
         rids[i] = rid_gen.nextForDelete();
+
+    // See placeInsert: one lock for the whole batch.
+    auto write_lock = delta_tree.lockForWrite();
     for (size_t i = 0; i < limit; ++i)
     {
         if (rids[i] >= 0)

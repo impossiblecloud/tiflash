@@ -411,11 +411,14 @@ bool DeltaValueSpace::flush(DMContext & context)
             // path taken when there is nothing to update: the flush still commits and
             // the index is rebuilt on the next read. Without this the exception escapes
             // to the proxy FFI boundary, whose catch-all calls exit(-1).
+            // Log the stack: this is currently our only signal that a DeltaTree got
+            // damaged, and the caller chain is what identifies who was holding it.
             LOG_ERROR(
                 log,
-                "Update index failed, skipping index update, delta={} message={}",
+                "Update index failed, skipping index update, delta={} message={} stack={}",
                 simpleInfo(),
-                e.message());
+                e.message(),
+                e.getStackTrace().toString());
         }
     }
     GET_METRIC(tiflash_storage_subtask_throughput_bytes, type_delta_flush).Increment(flush_task->getFlushBytes());

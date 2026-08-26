@@ -20,10 +20,13 @@
 #include <IO/WriteHelpers.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <ext/scope_guard.h>
 #include <memory>
+#include <mutex>
 #include <queue>
+#include <shared_mutex>
 
 namespace DB::FailPoints
 {
@@ -825,7 +828,33 @@ private:
     std::unique_ptr<Allocator> allocator;
     size_t bytes = 0;
 
+    /// Guards the node structure (`root` and everything reachable from it).
+    ///
+    /// The copy constructor walks the source tree breadth-first while reading
+    /// `children[]` straight out of that source, so a concurrent structural
+    /// change produces either a node with `count == 0` (throws
+    /// DT_DELTA_INDEX_ERROR) or a copy holding a stale child pointer, which
+    /// segfaults later in `freeTree` when the copy is destroyed.
+    ///
+    /// Writers take it exclusively for a whole placement batch, never per row
+    /// -- see `placeInsert`/`placeDelete`. The copy constructor and
+    /// `getCompactedEntries` take it shared.
+    mutable std::shared_mutex tree_mutex;
+
 public:
+    /// Held by writers for the duration of a placement batch.
+    [[nodiscard]] std::unique_lock<std::shared_mutex> lockForWrite() const
+    {
+        return std::unique_lock<std::shared_mutex>(tree_mutex);
+    }
+
+    /// Held by anything that walks the tree without changing it.
+    /// Not recursive: the caller must not already hold either lock.
+    [[nodiscard]] std::shared_lock<std::shared_mutex> lockForRead() const
+    {
+        return std::shared_lock<std::shared_mutex>(tree_mutex);
+    }
+
     // For test cases only.
     ValueSpacePtr insert_value_space;
 
@@ -954,6 +983,23 @@ public:
     explicit DeltaTree(const ValueSpacePtr & insert_value_space_) { init(insert_value_space_); }
     DeltaTree(const Self & o);
 
+private:
+    /// Delegated-to by the copy constructor. The shared_lock is constructed as
+    /// an argument so it is held across this constructor's member initializers
+    /// *and* body, keeping the copied scalars consistent with the node
+    /// structure they describe.
+    DeltaTree(const Self & o, const std::shared_lock<std::shared_mutex> &);
+
+public:
+    /// Copy under a read lock the caller already holds, so a caller can check an
+    /// invariant and copy against the same view. The copy constructor takes the
+    /// lock itself, so it cannot be reused for that.
+    [[nodiscard]] std::shared_ptr<Self> cloneLocked(const std::shared_lock<std::shared_mutex> & lock) const
+    {
+        assert(lock.owns_lock() && lock.mutex() == &tree_mutex);
+        return std::shared_ptr<Self>(new Self(*this, lock));
+    }
+
     DeltaTree & operator=(const Self & o) = delete;
     DeltaTree & operator=(Self && o) = delete;
 
@@ -1019,15 +1065,26 @@ public:
         return std::make_shared<DTEntriesCopy<M, F, S, CopyAllocator>>(left_leaf, num_entries, delta);
     }
 
+    /// Locked because these entries feed `createNewStable` via
+    /// prepareMergeDelta/prepareSplitPhysical/prepareMerge -- a torn walk here
+    /// reaches disk, not just one query's results.
     CompactedEntriesPtr getCompactedEntries()
     {
+        auto read_lock = lockForRead();
         return std::make_shared<CompactedEntries>(begin(), end(), num_entries);
     }
 
     size_t numEntries() const { return num_entries; }
     size_t numInserts() const { return num_inserts; }
     size_t numDeletes() const { return num_deletes; }
-    Int64 maxDupTupleID() const { return max_dup_tuple_id; }
+    /// Takes the lock as proof, so it cannot be checked against one view of the
+    /// tree and acted on against another.
+    Int64 maxDupTupleID(const std::shared_lock<std::shared_mutex> & lock) const
+    {
+        assert(lock.owns_lock() && lock.mutex() == &tree_mutex);
+        (void)lock;
+        return max_dup_tuple_id;
+    }
     void setMaxDupTupleID(Int64 tuple_id) { max_dup_tuple_id = std::max(tuple_id, max_dup_tuple_id); }
 
     void addDelete(UInt64 rid);
@@ -1041,6 +1098,11 @@ public:
 
 DT_TEMPLATE
 DT_CLASS::DeltaTree(const DT_CLASS::Self & o)
+    : DeltaTree(o, std::shared_lock<std::shared_mutex>(o.tree_mutex))
+{}
+
+DT_TEMPLATE
+DT_CLASS::DeltaTree(const DT_CLASS::Self & o, const std::shared_lock<std::shared_mutex> &)
     : height(o.height)
     , num_inserts(o.num_inserts)
     , num_deletes(o.num_deletes)

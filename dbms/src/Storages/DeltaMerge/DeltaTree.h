@@ -370,6 +370,21 @@ struct DTIntern
 
     std::string toString() { return "{count:" + DB::toString(count) + ",parent:" + addrToHex(parent) + "}"; }
 
+    /// Reading `mark`: 0 = live intern, 1 = live leaf, pointer-like = the arena
+    /// has written its free-list link over it, i.e. this node was freed.
+    std::string debugDump() const
+    {
+        constexpr size_t n = std::min<size_t>(4, F * S + 1);
+        std::string s = "{mark:" + (mark == 0 ? std::string("0") : addrToHex(reinterpret_cast<const void *>(mark)))
+            + ",count:" + DB::toString(count) + ",parent:" + addrToHex(parent) + ",children:[";
+        for (size_t i = 0; i < n; ++i)
+            s += (i ? "," : "") + addrToHex(children[i]);
+        s += "],sids:[";
+        for (size_t i = 0; i < n; ++i)
+            s += (i ? "," : "") + DB::toString(static_cast<UInt64>(sids[i]));
+        return s + "]}";
+    }
+
     inline UInt64 sid(size_t pos) const { return sids[pos]; }
     inline UInt64 rid(size_t pos, Int64 delta) const { return sids[pos] + delta; }
 
@@ -1160,7 +1175,12 @@ DT_CLASS::DeltaTree(const DT_CLASS::Self & o, const std::shared_lock<std::shared
         {
             auto intern = as(Intern, node);
             if (unlikely(!intern->count))
-                throw Exception("Unexpected internal node which count = 0", ErrorCodes::DT_DELTA_INDEX_ERROR);
+                // `intern` is the copy, but it was memberwise-copied from the source, so its fields are the source's.
+                throw Exception(
+                    "Unexpected internal node which count = 0, node=" + intern->debugDump()
+                        + (node == my_root ? " is_root=true source=" + addrToHex(o.root) : std::string(" is_root=false"))
+                        + " src_height=" + DB::toString(o.height) + " src_entries=" + DB::toString(o.num_entries),
+                    ErrorCodes::DT_DELTA_INDEX_ERROR);
             if (isLeaf(intern->children[0]))
             {
                 for (size_t i = 0; i < intern->count; ++i)
